@@ -1,0 +1,6 @@
+{
+  "name": "SentinelGate",
+  "description": "AI agent early behavioral detection, zero-egress quarantine sandbox orchestrator, and origin attribution console.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
