@@ -6,30 +6,24 @@ import { ActionGateView } from './components/ActionGateView';
 import { TrapSandboxView } from './components/TrapSandboxView';
 import { OriginAttributionView } from './components/OriginAttributionView';
 import { HarnessView } from './components/HarnessView';
+import {
+  sentinelService,
+  type EvaluateActionRequest,
+  type SemanticAuditRequest,
+} from './services/sentinelService';
 import type {
   ActionGateEvaluation,
-  ActionPhase,
   AgentBaseline,
   AttributionFinding,
   HarnessScenario,
   HarnessTestResult,
   IngressProvenance,
-  ProvenanceTag,
+  PublicRuntimeConfig,
   QuarantineQueueItem,
   SandboxPolicy,
-  SourceTrust,
+  SemanticAuditResult,
   TrapSessionRecord,
-  TriggerSource,
 } from './types/security';
-
-interface AppStateResponse {
-  baselines: AgentBaseline[];
-  evaluations: ActionGateEvaluation[];
-  quarantineQueue: QuarantineQueueItem[];
-  trapSessions: TrapSessionRecord[];
-  scenarios: HarnessScenario[];
-  defaultPolicy: SandboxPolicy;
-}
 
 export default function App() {
   const [activeView, setActiveView] = useState<WorkspaceView>('overview');
@@ -42,6 +36,7 @@ export default function App() {
   const [trapSessions, setTrapSessions] = useState<TrapSessionRecord[]>([]);
   const [scenarios, setScenarios] = useState<HarnessScenario[]>([]);
   const [defaultPolicy, setDefaultPolicy] = useState<SandboxPolicy | null>(null);
+  const [runtimeConfig, setRuntimeConfig] = useState<PublicRuntimeConfig | null>(null);
 
   const [selectedSessionId, setSelectedSessionId] = useState<string | null>(null);
   const [selectedScenario, setSelectedScenario] = useState<HarnessScenario | null>(null);
@@ -55,19 +50,28 @@ export default function App() {
   const [harnessResults, setHarnessResults] = useState<HarnessTestResult[] | null>(null);
   const [runningHarness, setRunningHarness] = useState(false);
 
-  const fetchState = useCallback(async () => {
+  const loadPlatformState = useCallback(async () => {
+    setLoading(true);
     try {
-      const res = await fetch('/api/state');
-      if (!res.ok) {
-        throw new Error(`Failed to load telemetry state (${res.status})`);
+      const data = await sentinelService.fetchState();
+      if (
+        !data ||
+        !Array.isArray(data.baselines) ||
+        !Array.isArray(data.evaluations) ||
+        !Array.isArray(data.quarantineQueue) ||
+        !Array.isArray(data.trapSessions) ||
+        !Array.isArray(data.scenarios)
+      ) {
+        throw new Error('Received incomplete state payload from security backend.');
       }
-      const data: AppStateResponse = await res.json();
+
       setBaselines(data.baselines);
       setEvaluations(data.evaluations);
       setQuarantineQueue(data.quarantineQueue);
       setTrapSessions(data.trapSessions);
       setScenarios(data.scenarios);
-      setDefaultPolicy(data.defaultPolicy);
+      setDefaultPolicy(data.defaultPolicy ?? null);
+      setRuntimeConfig(data.runtimeConfig ?? null);
       if (data.trapSessions.length > 0) {
         setSelectedSessionId((prev) => prev ?? data.trapSessions[0].session_id);
       }
@@ -80,36 +84,17 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    fetchState();
-  }, [fetchState]);
+    loadPlatformState();
+  }, [loadPlatformState]);
 
+  const safeTrapSessions = Array.isArray(trapSessions) ? trapSessions : [];
   const activeSession =
-    trapSessions.find((s) => s.session_id === selectedSessionId) ?? trapSessions[0] ?? null;
+    safeTrapSessions.find((s) => s.session_id === selectedSessionId) ??
+    safeTrapSessions[0] ??
+    null;
 
-  const handleEvaluate = async (payload: {
-    agent_id: string;
-    user_goal: string;
-    phase: ActionPhase;
-    source_trust: SourceTrust;
-    provenance_tag: ProvenanceTag;
-    trigger_source: TriggerSource;
-    tool_name: string;
-    target_resource: string;
-    record_count: number;
-    prior_tools: string[];
-    raw_payload: string;
-    ingress: IngressProvenance;
-  }): Promise<ActionGateEvaluation> => {
-    const res = await fetch('/api/evaluate', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(payload),
-    });
-    if (!res.ok) {
-      throw new Error('Action boundary evaluation failed');
-    }
-    const data: { evaluation: ActionGateEvaluation; queueItem: QuarantineQueueItem | null } =
-      await res.json();
+  const handleEvaluate = async (payload: EvaluateActionRequest): Promise<ActionGateEvaluation> => {
+    const data = await sentinelService.evaluateAction(payload);
     setEvaluations((prev) => [data.evaluation, ...prev]);
     if (data.queueItem) {
       setQuarantineQueue((prev) => [data.queueItem!, ...prev]);
@@ -117,19 +102,18 @@ export default function App() {
     return data.evaluation;
   };
 
+  const handleSemanticAudit = async (
+    payload: SemanticAuditRequest,
+  ): Promise<SemanticAuditResult> => {
+    const data = await sentinelService.runSemanticAudit(payload);
+    return data.audit;
+  };
+
   const handleResolveQuarantine = async (
     id: string,
     action: 'route_to_trap' | 'approve_once' | 'revoke',
   ) => {
-    const res = await fetch(`/api/quarantine/${encodeURIComponent(id)}/resolve`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ action }),
-    });
-    if (!res.ok) {
-      throw new Error('Failed to resolve quarantine item');
-    }
-    const data: { item: QuarantineQueueItem; trapSession?: TrapSessionRecord } = await res.json();
+    const data = await sentinelService.resolveQuarantine(id, action);
     setQuarantineQueue((prev) => prev.map((q) => (q.id === id ? data.item : q)));
     if (data.trapSession) {
       setTrapSessions((prev) => [data.trapSession!, ...prev]);
@@ -145,15 +129,7 @@ export default function App() {
     ingress: IngressProvenance;
     policy: SandboxPolicy;
   }): Promise<TrapSessionRecord> => {
-    const res = await fetch('/api/sandbox/run', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(params),
-    });
-    if (!res.ok) {
-      throw new Error('Trap sandbox execution failed');
-    }
-    const data: { session: TrapSessionRecord } = await res.json();
+    const data = await sentinelService.runSandbox(params);
     setSandboxDraft(null);
     setTrapSessions((prev) => [data.session, ...prev]);
     setSelectedSessionId(data.session.session_id);
@@ -165,28 +141,19 @@ export default function App() {
     ingress: IngressProvenance;
     observed_texts: string[];
   }): Promise<AttributionFinding> => {
-    const res = await fetch('/api/attribution/analyze', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(params),
-    });
-    if (!res.ok) {
-      throw new Error('Attribution correlation failed');
-    }
-    const data: { finding: AttributionFinding } = await res.json();
+    const data = await sentinelService.analyzeAttribution(params);
     return data.finding;
   };
 
   const handleRunHarness = async () => {
     setRunningHarness(true);
     try {
-      const res = await fetch('/api/harness/run', { method: 'POST' });
-      if (!res.ok) {
-        throw new Error('Regression suite execution failed');
-      }
-      const data: { results: HarnessTestResult[] } = await res.json();
+      const data = await sentinelService.runHarness();
       setHarnessResults(data.results);
+      setError(null);
       setActiveView('regression-harness');
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Unable to run adversarial regression harness.');
     } finally {
       setRunningHarness(false);
     }
@@ -213,88 +180,104 @@ export default function App() {
             <p className="font-medium">Unable to load security engine state: {error}</p>
             <button
               type="button"
-              onClick={fetchState}
+              onClick={loadPlatformState}
               className="mt-3 px-4 py-2 text-xs font-medium text-white bg-slate-900 rounded-lg hover:bg-slate-800 cursor-pointer"
             >
               Retry Connection
             </button>
           </div>
         ) : (
-          <div className="flex flex-col lg:flex-row gap-6 items-start">
-            <SidebarRail
-              trapSessions={trapSessions}
-              selectedSessionId={activeSession?.session_id ?? null}
-              onSelectSession={(id) => {
-                setSelectedSessionId(id);
-                setSandboxDraft(null);
-                if (activeView === 'overview' || activeView === 'regression-harness') {
-                  setActiveView('trap-sandbox');
-                }
-              }}
-              baselines={baselines}
-            />
+          <div className="space-y-4">
+            {runtimeConfig?.limits && (
+              <div className="flex flex-wrap items-center justify-between gap-4 px-4 py-2.5 bg-white border border-slate-200 rounded-xl text-xs text-slate-600">
+                <span className="font-mono tabular-nums">
+                  Policy Limits: {runtimeConfig.limits.aiMaxPerMinute} AI/min ·{' '}
+                  {runtimeConfig.limits.mutationMaxPerMinute} mutations/min ·{' '}
+                  {runtimeConfig.limits.maxAiOutputTokens} max out tokens ·{' '}
+                  {runtimeConfig.limits.hourlyTokenCap} tok/hr
+                </span>
+              </div>
+            )}
 
-            <div className="flex-1 min-w-0 w-full">
-              {activeView === 'overview' && (
-                <OverviewView
-                  evaluations={evaluations}
-                  quarantineQueue={quarantineQueue}
-                  trapSessions={trapSessions}
-                  onNavigate={setActiveView}
-                  onSelectSession={(id) => {
-                    setSelectedSessionId(id);
-                    setSandboxDraft(null);
-                  }}
-                  onResolveQuarantine={handleResolveQuarantine}
-                />
-              )}
-
-              {activeView === 'action-gate' && (
-                <ActionGateView
-                  baselines={baselines}
-                  scenarios={scenarios}
-                  selectedScenario={selectedScenario}
-                  latestEvaluation={evaluations[0] ?? null}
-                  onEvaluate={handleEvaluate}
-                  onSendToTrap={(draft) => {
-                    setSandboxDraft(draft);
+            <div className="flex flex-col lg:flex-row gap-6 items-start">
+              <SidebarRail
+                trapSessions={trapSessions}
+                selectedSessionId={activeSession?.session_id ?? null}
+                onSelectSession={(id) => {
+                  setSelectedSessionId(id);
+                  setSandboxDraft(null);
+                  if (activeView === 'overview' || activeView === 'regression-harness') {
                     setActiveView('trap-sandbox');
-                  }}
-                />
-              )}
+                  }
+                }}
+                baselines={baselines}
+              />
 
-              {activeView === 'trap-sandbox' && defaultPolicy && (
-                <TrapSandboxView
-                  defaultPolicy={defaultPolicy}
-                  activeSession={activeSession}
-                  draftInput={sandboxDraft}
-                  onRunSandbox={handleRunSandbox}
-                  onInspectAttribution={(id) => {
-                    setSelectedSessionId(id);
-                    setActiveView('origin-attribution');
-                  }}
-                />
-              )}
+              <div className="flex-1 min-w-0 w-full">
+                {activeView === 'overview' && (
+                  <OverviewView
+                    evaluations={evaluations}
+                    quarantineQueue={quarantineQueue}
+                    trapSessions={trapSessions}
+                    onNavigate={setActiveView}
+                    onSelectSession={(id) => {
+                      setSelectedSessionId(id);
+                      setSandboxDraft(null);
+                    }}
+                    onResolveQuarantine={handleResolveQuarantine}
+                  />
+                )}
 
-              {activeView === 'origin-attribution' && (
-                <OriginAttributionView
-                  activeSession={activeSession}
-                  onAnalyzeAttribution={handleAnalyzeAttribution}
-                />
-              )}
+                {activeView === 'action-gate' && (
+                  <ActionGateView
+                    baselines={baselines}
+                    scenarios={scenarios}
+                    selectedScenario={selectedScenario}
+                    latestEvaluation={evaluations[0] ?? null}
+                    runtimeConfig={runtimeConfig}
+                    onEvaluate={handleEvaluate}
+                    onSemanticAudit={handleSemanticAudit}
+                    onSendToTrap={(draft) => {
+                      setSandboxDraft(draft);
+                      setActiveView('trap-sandbox');
+                    }}
+                  />
+                )}
 
-              {activeView === 'regression-harness' && (
-                <HarnessView
-                  scenarios={scenarios}
-                  results={harnessResults}
-                  running={runningHarness}
-                  onRunHarness={handleRunHarness}
-                  onLoadScenarioInGate={(sc) => {
-                    setSelectedScenario(sc);
-                    setActiveView('action-gate');
-                  }}
-                />
-              )}
+                {activeView === 'trap-sandbox' && defaultPolicy && (
+                  <TrapSandboxView
+                    defaultPolicy={defaultPolicy}
+                    runtimeConfig={runtimeConfig}
+                    activeSession={activeSession}
+                    draftInput={sandboxDraft}
+                    onRunSandbox={handleRunSandbox}
+                    onInspectAttribution={(id) => {
+                      setSelectedSessionId(id);
+                      setActiveView('origin-attribution');
+                    }}
+                  />
+                )}
+
+                {activeView === 'origin-attribution' && (
+                  <OriginAttributionView
+                    activeSession={activeSession}
+                    onAnalyzeAttribution={handleAnalyzeAttribution}
+                  />
+                )}
+
+                {activeView === 'regression-harness' && (
+                  <HarnessView
+                    scenarios={scenarios}
+                    results={harnessResults}
+                    running={runningHarness}
+                    onRunHarness={handleRunHarness}
+                    onLoadScenarioInGate={(sc) => {
+                      setSelectedScenario(sc);
+                      setActiveView('action-gate');
+                    }}
+                  />
+                )}
+              </div>
             </div>
           </div>
         )}

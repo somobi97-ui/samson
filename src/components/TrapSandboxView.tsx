@@ -1,7 +1,10 @@
 import React, { useEffect, useState } from 'react';
 import { Copy, Check, Download, ShieldAlert, Lock } from 'lucide-react';
+import { appConfig } from '../config/appConfig';
+import { sentinelService } from '../services/sentinelService';
 import type {
   IngressProvenance,
+  PublicRuntimeConfig,
   SandboxPolicy,
   SandboxRuntime,
   TrapSessionRecord,
@@ -9,6 +12,7 @@ import type {
 
 interface TrapSandboxViewProps {
   defaultPolicy: SandboxPolicy;
+  runtimeConfig: PublicRuntimeConfig | null;
   activeSession: TrapSessionRecord | null;
   draftInput: {
     agent_id: string;
@@ -29,6 +33,7 @@ interface TrapSandboxViewProps {
 
 export const TrapSandboxView: React.FC<TrapSandboxViewProps> = ({
   defaultPolicy,
+  runtimeConfig,
   activeSession,
   draftInput,
   onRunSandbox,
@@ -70,6 +75,7 @@ except Exception as exc:
   const [specTab, setSpecTab] = useState<'telemetry' | 'docker' | 'seccomp'>('telemetry');
   const [copied, setCopied] = useState(false);
   const [running, setRunning] = useState(false);
+  const [runError, setRunError] = useState<string | null>(null);
 
   useEffect(() => {
     if (draftInput) {
@@ -93,6 +99,7 @@ except Exception as exc:
   const handleExecute = async (e: React.FormEvent) => {
     e.preventDefault();
     setRunning(true);
+    setRunError(null);
     try {
       await onRunSandbox({
         agent_id: agentId,
@@ -102,8 +109,19 @@ except Exception as exc:
         ingress,
         policy,
       });
+    } catch (err) {
+      setRunError(err instanceof Error ? err.message : 'Unable to execute trap sandbox.');
     } finally {
       setRunning(false);
+    }
+  };
+
+  const handleDownloadTelemetry = async (sessionId: string) => {
+    setRunError(null);
+    try {
+      await sentinelService.downloadSessionTelemetry(sessionId);
+    } catch (err) {
+      setRunError(err instanceof Error ? err.message : 'Unable to export telemetry log.');
     }
   };
 
@@ -167,9 +185,11 @@ except Exception as exc:
                   }
                   className="mt-1 w-full px-3 py-2 text-xs bg-slate-50 border border-slate-200 rounded-lg text-slate-900 font-mono"
                 >
-                  <option value="gvisor-runsc">gVisor (--runtime=runsc)</option>
-                  <option value="firecracker-microvm">Firecracker MicroVM (kata-fc)</option>
-                  <option value="docker-runc">Hardened Container (runc)</option>
+                  {appConfig.sandboxRuntimes.map((rt) => (
+                    <option key={rt.value} value={rt.value}>
+                      {rt.label}
+                    </option>
+                  ))}
                 </select>
               </label>
 
@@ -261,7 +281,9 @@ except Exception as exc:
                   }
                   className="rounded border-slate-300"
                 />
-                <span>Enforce host firewall drop for IMDS (169.254.169.254)</span>
+                <span>
+                  Enforce host firewall drop for IMDS ({runtimeConfig?.imdsHost ?? 'metadata endpoint'})
+                </span>
               </label>
             </div>
 
@@ -330,6 +352,11 @@ except Exception as exc:
                 {running ? 'Running in Trap...' : 'Execute in Trap'}
               </button>
             </div>
+            {runError && (
+              <p className="p-3 rounded-lg border border-red-200 bg-red-50 text-xs text-red-700">
+                {runError}
+              </p>
+            )}
           </div>
         </form>
       </section>
@@ -353,14 +380,14 @@ except Exception as exc:
               </h2>
             </div>
 
-            <a
-              href={`/api/sessions/${encodeURIComponent(activeSession.session_id)}/telemetry.jsonl`}
-              download
-              className="inline-flex items-center gap-1.5 px-3.5 py-2 text-xs font-medium text-slate-900 bg-slate-100 hover:bg-slate-200 rounded-lg transition-colors whitespace-nowrap shrink-0"
+            <button
+              type="button"
+              onClick={() => handleDownloadTelemetry(activeSession.session_id)}
+              className="inline-flex items-center gap-1.5 px-3.5 py-2 text-xs font-medium text-slate-900 bg-slate-100 hover:bg-slate-200 rounded-lg transition-colors whitespace-nowrap shrink-0 cursor-pointer"
             >
               <Download className="w-3.5 h-3.5" aria-hidden="true" />
               <span>Export telemetry.jsonl</span>
-            </a>
+            </button>
           </div>
 
           {/* Decoy Files & Intercepted Blocks */}

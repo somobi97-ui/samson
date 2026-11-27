@@ -68,6 +68,7 @@ export const OverviewView: React.FC<OverviewViewProps> = ({
   const [searchQuery, setSearchQuery] = useState('');
   const [decisionFilter, setDecisionFilter] = useState<'ALL' | GateDecision>('ALL');
   const [busyId, setBusyId] = useState<string | null>(null);
+  const [resolveError, setResolveError] = useState<string | null>(null);
 
   const metrics = useMemo(() => {
     const blockedCount = evaluations.filter((e) => e.decision !== 'ALLOW_LOG').length;
@@ -109,8 +110,13 @@ export const OverviewView: React.FC<OverviewViewProps> = ({
     action: 'route_to_trap' | 'approve_once' | 'revoke',
   ) => {
     setBusyId(id);
+    setResolveError(null);
     try {
       await onResolveQuarantine(id, action);
+    } catch (err) {
+      setResolveError(
+        err instanceof Error ? err.message : 'Unable to update quarantine item.',
+      );
     } finally {
       setBusyId(null);
     }
@@ -249,6 +255,12 @@ export const OverviewView: React.FC<OverviewViewProps> = ({
             {quarantineQueue.filter((q) => q.status === 'pending_review').length} pending review
           </span>
         </div>
+
+        {resolveError && (
+          <p className="mt-4 p-3 rounded-lg border border-red-200 bg-red-50 text-xs text-red-700">
+            {resolveError}
+          </p>
+        )}
 
         {quarantineQueue.length === 0 ? (
           <div className="py-10 text-center">

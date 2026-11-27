@@ -8,19 +8,9 @@ import type {
   TrapSessionRecord,
 } from '../../src/types/security.ts';
 import { buildAttributionReport, extractIndicators } from './attribution.ts';
+import { serverConfig } from '../config/env.ts';
 
-export const DEFAULT_SANDBOX_POLICY: SandboxPolicy = {
-  cpu_quota: '0.5',
-  memory_limit: '256m',
-  pids_limit: 64,
-  timeout_seconds: 15,
-  image: 'python:3.12-slim',
-  enable_decoy_workspace: true,
-  runtime: 'gvisor-runsc',
-  seccomp_enabled: true,
-  strip_env_secrets: true,
-  host_firewall_drop_imds: true,
-};
+export const DEFAULT_SANDBOX_POLICY: SandboxPolicy = serverConfig.sandbox.defaultPolicy;
 
 export function createDecoyWorkspaceFiles(enableDecoys: boolean): Record<string, string> {
   if (!enableDecoys) {

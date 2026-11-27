@@ -1,6 +1,6 @@
 # Detection, Sandbox & Attribution Technical Specification
 
-This document maps the exact specifications and reference code from the three thesis PDFs to SentinelGate's TypeScript implementation.
+This document maps the exact specifications and reference code from the three thesis PDFs—plus SentinelGate's validation, semantic escalation, and redacted observability controls—to the TypeScript implementation.
 
 ---
 
@@ -17,7 +17,7 @@ Every action evaluated at the interceptor boundary generates an `AgentActionEven
 
 ---
 
-## 2. Early-Stage Detection & Action-Boundary Scoring
+## 2. Early-Stage Detection, Action-Boundary Scoring & Semantic Audit
 
 ### Stage A — `AgentRiskClassifier` (Thesis 2)
 Runs four regex groups over combined prompt/tool/payload text:
@@ -26,9 +26,9 @@ Runs four regex groups over combined prompt/tool/payload text:
 3. `sensitive_os_or_imds`: `/etc/shadow|/etc/passwd|169.254.169.254`
 4. `python_network_libs`: `\b(socket|urllib|requests|httpx|aiohttp)\b`
 
-Scoring formula:
-- `risk_score = min(1.0, matched_patterns.length * 0.35)`
-- `should_trap = risk_score >= 0.35`
+Scoring formula (using env-configurable defaults from `server/config/env.ts`):
+- `risk_score = min(1.0, matched_patterns.length * serverConfig.detector.classifierPatternWeight)` (default `0.35`)
+- `should_trap = risk_score >= serverConfig.detector.trapThreshold` (default `0.35`)
 
 ### Stage B — Behavioral & Injection Detectors (Thesis 3)
 - **Instruction-in-Data Collisions**: Flags role overrides (`ignore previous`, `you are now`), hidden HTML directives (`<!-- ... -->`), encoded execution markers (`base64 -d`, `atob(`, `eval(`, `__import__`), and environment probes (`os.environ`), with elevated weighting when provenance is untrusted.
@@ -47,19 +47,34 @@ Scoring formula:
 - `action_risk` (`0.0–1.0`): Blast radius (`0.80` high, `0.50` medium, `0.15` low) + provenance penalty (`+0.20` for `untrusted_external`, `+0.10` for `mixed`), capped at `1.0`.
 - `anomaly_score` (`0.0–1.0`): `0.7 * max(signal_scores) + 0.3 * mean(signal_scores)`.
 - `combined_risk`: `0.4 * action_risk + 0.6 * anomaly_score`.
-- **Gate Thresholds**:
-  - `HARD_BLOCK_REVOKE`: Any `critical` signal, canary hit, or `combined_risk >= 0.72`
-  - `STEP_UP_QUARANTINE`: `combined_risk >= 0.35`, `classifier.should_trap === true`, or any non-zero signal
+- **Gate Thresholds** (configurable via `DETECTOR_BLOCK_THRESHOLD` / `DETECTOR_TRAP_THRESHOLD`):
+  - `HARD_BLOCK_REVOKE`: Any `critical` signal, canary hit, or `combined_risk >= serverConfig.detector.blockThreshold` (default `0.72`)
+  - `STEP_UP_QUARANTINE`: `combined_risk >= serverConfig.detector.trapThreshold` (default `0.35`), `classifier.should_trap === true`, or any non-zero signal
   - `ALLOW_LOG`: Otherwise
+
+### Stage D — Optional Gemini Semantic Intent Escalation (`server/services/aiModelService.ts`)
+Operators can invoke `POST /api/semantic-audit` on any action span for secondary LLM-backed semantic intent verification:
+- **Prompt Construction (`buildSemanticAuditPrompt`)**: Anchors bounded `Initial User Goal` (max 500 chars), `Proposed Tool`, `Target Resource`, and `Provenance Tag` (`source_trust`) separately from `Payload Snippet`, hard-capped at `AI_MAX_INPUT_CHARS` (default `3500`), paired with a strict `systemInstruction` instructing the evaluator never to obey directives inside the payload snippet.
+- **Model & Structured Schema**: Calls `GEMINI_INTENT_MODEL` (default `gemini-4-hydrogen`) with `ThinkingLevel.LOW`, `maxOutputTokens: 512`, `responseMimeType: 'application/json'`, and a `responseSchema` requiring:
+  - `intent_divergence_score`: `number` (`0.0..1.0`)
+  - `hidden_directive_detected`: `boolean`
+  - `classification`: `'ALIGNED' | 'SUSPICIOUS_DRIFT' | 'HIJACKED_INTENT'`
+  - `rationale`: `string`
+- **Output Validation (`validateStructuredModelOutput`)**: Strips optional markdown code fences, parses JSON, verifies finite `0..1` score, boolean flag, strict classification enum membership, and non-empty control-char-stripped rationale (`<= 500` chars).
+- **Resilience & Cost Controls**:
+  - Rolling hourly token cap (`AI_HOURLY_TOKEN_CAP`, default `50000`) enforced both globally and per-IP (`actor_key`), reconciled against `usageMetadata.totalTokenCount` or refunded on complete failure.
+  - Per-attempt `AbortController` + SDK timeout (`AI_REQUEST_TIMEOUT_MS=12000`) and bounded exponential backoff with jitter (`AI_MAX_RETRIES=2`, `AI_RETRY_BASE_DELAY_MS=400`) on transient `408`/`429`/`5xx`/network/timeout errors.
+  - Failures throw `SafeUpstreamError` with user-safe guidance reminding the operator that deterministic policy scoring remains active.
 
 ---
 
 ## 3. Zero-Egress Trap Sandbox (`server/engine/sandbox.ts`)
 
-### Default `SandboxPolicy`
-- `runtime`: `'gvisor-runsc'` (supports `'firecracker-microvm'` and `'docker-runc'`)
-- `cpu_quota`: `'0.5'`, `memory_limit`: `'256m'`, `pids_limit`: `64`, `timeout_seconds`: `15`
-- `image`: `'python:3.12-slim'`
+### Default `SandboxPolicy` (Configurable via `server/config/env.ts`)
+- `runtime`: `SANDBOX_RUNTIME` — `'gvisor-runsc'` default (supports `'firecracker-microvm'` and `'docker-runc'`)
+- `cpu_quota`: `SANDBOX_CPU_QUOTA` (`'0.5'`), `memory_limit`: `SANDBOX_MEMORY_LIMIT` (`'256m'`), `pids_limit`: `SANDBOX_PIDS_LIMIT` (`64`), `timeout_seconds`: `SANDBOX_TIMEOUT_SECONDS` (`15`)
+- `image`: `SANDBOX_IMAGE` (`'python:3.12-slim'`)
+- `imdsHost`: `SANDBOX_IMDS_HOST` (`'169.254.169.254'`)
 - `enable_decoy_workspace`: `true`
 - `seccomp_enabled`: `true`, `strip_env_secrets`: `true`, `host_firewall_drop_imds`: `true`
 
@@ -95,3 +110,18 @@ Extracts deduplicated, sorted indicators from observed text blobs and `blocked_n
   - `medium`: `hasStrongUpstream && hasEmbeddedTargets`
   - `low-to-medium`: `hasStrongUpstream || hasEmbeddedTargets`
   - `low`: Neither condition met
+
+---
+
+## 5. Payload Validation & Secret-Redacted Observability
+
+### Boundary Payload Validation (`server/validation/payloadSchemas.ts`)
+All POST request bodies and URL identifiers are validated before reaching engine logic:
+- **Path & Span Identifiers**: `SAFE_ID_REGEX` (`^[a-zA-Z0-9_-]{4,64}$`), `SAFE_AGENT_ID_REGEX`, `SAFE_TOOL_REGEX`, `SAFE_PROTOCOL_REGEX`, `SAFE_IP_OR_HOST_REGEX`.
+- **Enum & Bound Guards**: Enforces allowed `ActionPhase`, `SourceTrust`, `ProvenanceTag`, `TriggerSource`, `SandboxRuntime`, `pids_limit` (`8..1024`), `timeout_seconds` (`1..120`), `record_count` (`0..100000`), `cpu_quota` (`0.01..8`), `memory_limit`, and string max lengths while stripping ASCII control characters.
+
+### Secret-Redacted Structured Logging (`server/services/logger.ts`)
+- Every `/api` request receives a validated or generated `X-Request-Id` header and a 12-char SHA-256 `clientIpHash`.
+- `scrubSecrets` strips Gemini API keys (`AIza...`), `Bearer` tokens, `sk-...` keys, and `GEMINI_API_KEY=...` assignments.
+- `sanitizeForLog` recursively masks sensitive keys (`apiKey`, `secret`, `token`, `password`, `authorization`, `cookie`, `credential`, `raw_payload`, `agent_code`, `observed_text`, `user_goal`, `prompt`, `extra_headers`, `peer_ip`, `email`) while preserving safe telemetry identifiers (`requestId`, `payload_hash`, `session_id`, `trace_id`, `agent_id`, `clientIpHash`, token counts).
+- Error-level logs populate a bounded ring (`recentIncidents`, max 50) for incident diagnostics, wired into HTTP error handlers and `process.on('unhandledRejection' | 'uncaughtException')` in `server.ts`.

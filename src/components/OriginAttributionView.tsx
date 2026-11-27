@@ -1,5 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import { Download, AlertCircle, Globe, Server } from 'lucide-react';
+import { sentinelService } from '../services/sentinelService';
 import type {
   AttributionFinding,
   IngressProvenance,
@@ -42,6 +43,7 @@ export const OriginAttributionView: React.FC<OriginAttributionViewProps> = ({
     activeSession?.attribution ?? null,
   );
   const [analyzing, setAnalyzing] = useState(false);
+  const [analyzeError, setAnalyzeError] = useState<string | null>(null);
 
   useEffect(() => {
     if (activeSession) {
@@ -65,6 +67,7 @@ export const OriginAttributionView: React.FC<OriginAttributionViewProps> = ({
   const handleAnalyze = async (e: React.FormEvent) => {
     e.preventDefault();
     setAnalyzing(true);
+    setAnalyzeError(null);
     try {
       const report = await onAnalyzeAttribution({
         session_id: activeSession?.session_id ?? 'manual-attribution-probe',
@@ -80,8 +83,21 @@ export const OriginAttributionView: React.FC<OriginAttributionViewProps> = ({
         observed_texts: [observedText],
       });
       setFinding(report);
+    } catch (err) {
+      setAnalyzeError(err instanceof Error ? err.message : 'Unable to correlate attribution.');
     } finally {
       setAnalyzing(false);
+    }
+  };
+
+  const handleDownloadAttribution = async (sessionId: string) => {
+    setAnalyzeError(null);
+    try {
+      await sentinelService.downloadSessionAttribution(sessionId);
+    } catch (err) {
+      setAnalyzeError(
+        err instanceof Error ? err.message : 'Unable to export attribution report.',
+      );
     }
   };
 
@@ -98,14 +114,14 @@ export const OriginAttributionView: React.FC<OriginAttributionViewProps> = ({
             </p>
           </div>
           {activeSession && (
-            <a
-              href={`/api/sessions/${encodeURIComponent(activeSession.session_id)}/attribution.json`}
-              download
-              className="inline-flex items-center gap-1.5 px-3.5 py-2 text-xs font-medium text-slate-900 bg-slate-100 hover:bg-slate-200 rounded-lg transition-colors whitespace-nowrap shrink-0"
+            <button
+              type="button"
+              onClick={() => handleDownloadAttribution(activeSession.session_id)}
+              className="inline-flex items-center gap-1.5 px-3.5 py-2 text-xs font-medium text-slate-900 bg-slate-100 hover:bg-slate-200 rounded-lg transition-colors whitespace-nowrap shrink-0 cursor-pointer"
             >
               <Download className="w-3.5 h-3.5" aria-hidden="true" />
               <span>Export attribution_report.json</span>
-            </a>
+            </button>
           )}
         </div>
 
@@ -212,6 +228,11 @@ export const OriginAttributionView: React.FC<OriginAttributionViewProps> = ({
                 {analyzing ? 'Correlating...' : 'Correlate Attribution'}
               </button>
             </div>
+            {analyzeError && (
+              <p className="p-3 rounded-lg border border-red-200 bg-red-50 text-xs text-red-700">
+                {analyzeError}
+              </p>
+            )}
           </div>
         </form>
       </section>

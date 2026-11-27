@@ -10,6 +10,7 @@ import type {
   SourceTrust,
   TriggerSource,
 } from '../../src/types/security.ts';
+import { serverConfig } from '../config/env.ts';
 
 // Exact SUSPICIOUS_PATTERNS from Thesis 2 (AgentRiskClassifier)
 const SUSPICIOUS_PATTERNS: Array<{ label: string; regex: RegExp }> = [
@@ -122,10 +123,13 @@ export function classifyAgentRisk(text: string): {
       matched.push(pat.label);
     }
   }
-  const risk_score = Math.min(1.0, Number((matched.length * 0.35).toFixed(2)));
+  const risk_score = Math.min(
+    1.0,
+    Number((matched.length * serverConfig.detector.classifierPatternWeight).toFixed(2)),
+  );
   return {
     risk_score,
-    should_trap: risk_score >= 0.35,
+    should_trap: risk_score >= serverConfig.detector.trapThreshold,
     matched_patterns: matched,
   };
 }
@@ -377,9 +381,17 @@ export function evaluateActionBoundary(input: EvaluateActionInput): ActionGateEv
   let decision: GateDecision = 'ALLOW_LOG';
   const hasCritical = signals.some((s) => s.severity === 'critical');
 
-  if (hasCritical || combined_risk >= 0.72 || canaryMatches.length > 0) {
+  if (
+    hasCritical ||
+    combined_risk >= serverConfig.detector.blockThreshold ||
+    canaryMatches.length > 0
+  ) {
     decision = 'HARD_BLOCK_REVOKE';
-  } else if (combined_risk >= 0.35 || classifier.should_trap || signals.length > 0) {
+  } else if (
+    combined_risk >= serverConfig.detector.trapThreshold ||
+    classifier.should_trap ||
+    signals.length > 0
+  ) {
     decision = 'STEP_UP_QUARANTINE';
   }
 

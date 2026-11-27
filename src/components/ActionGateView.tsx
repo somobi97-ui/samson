@@ -12,29 +12,21 @@ import type {
   HarnessScenario,
   IngressProvenance,
   ProvenanceTag,
+  PublicRuntimeConfig,
+  SemanticAuditResult,
   SourceTrust,
   TriggerSource,
 } from '../types/security';
+import type { EvaluateActionRequest, SemanticAuditRequest } from '../services/sentinelService';
 
 interface ActionGateViewProps {
   baselines: AgentBaseline[];
   scenarios: HarnessScenario[];
   selectedScenario?: HarnessScenario | null;
   latestEvaluation: ActionGateEvaluation | null;
-  onEvaluate: (payload: {
-    agent_id: string;
-    user_goal: string;
-    phase: ActionPhase;
-    source_trust: SourceTrust;
-    provenance_tag: ProvenanceTag;
-    trigger_source: TriggerSource;
-    tool_name: string;
-    target_resource: string;
-    record_count: number;
-    prior_tools: string[];
-    raw_payload: string;
-    ingress: IngressProvenance;
-  }) => Promise<ActionGateEvaluation>;
+  runtimeConfig: PublicRuntimeConfig | null;
+  onEvaluate: (payload: EvaluateActionRequest) => Promise<ActionGateEvaluation>;
+  onSemanticAudit: (payload: SemanticAuditRequest) => Promise<SemanticAuditResult>;
   onSendToTrap: (params: {
     agent_id: string;
     prompt: string;
@@ -48,7 +40,9 @@ export const ActionGateView: React.FC<ActionGateViewProps> = ({
   scenarios,
   selectedScenario,
   latestEvaluation,
+  runtimeConfig,
   onEvaluate,
+  onSemanticAudit,
   onSendToTrap,
 }) => {
   const initial = scenarios[0];
@@ -88,7 +82,11 @@ export const ActionGateView: React.FC<ActionGateViewProps> = ({
     },
   );
   const [result, setResult] = useState<ActionGateEvaluation | null>(latestEvaluation);
+  const [evaluateError, setEvaluateError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
+  const [semanticAudit, setSemanticAudit] = useState<SemanticAuditResult | null>(null);
+  const [semanticError, setSemanticError] = useState<string | null>(null);
+  const [auditingSemantic, setAuditingSemantic] = useState(false);
 
   const loadPreset = (scenario: HarnessScenario) => {
     setAgentId(scenario.agent_id);
@@ -115,6 +113,7 @@ export const ActionGateView: React.FC<ActionGateViewProps> = ({
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setSubmitting(true);
+    setEvaluateError(null);
     try {
       const prior_tools = priorToolsInput
         .split(',')
@@ -135,8 +134,32 @@ export const ActionGateView: React.FC<ActionGateViewProps> = ({
         ingress,
       });
       setResult(evaluation);
+    } catch (err) {
+      setEvaluateError(
+        err instanceof Error ? err.message : 'Unable to evaluate action boundary.',
+      );
     } finally {
       setSubmitting(false);
+    }
+  };
+
+  const handleSemanticAudit = async () => {
+    setAuditingSemantic(true);
+    setSemanticError(null);
+    try {
+      const audit = await onSemanticAudit({
+        user_goal: userGoal,
+        tool_name: toolName,
+        target_resource: targetResource,
+        provenance_tag: provenanceTag,
+        source_trust: sourceTrust,
+        raw_payload: rawPayload,
+      });
+      setSemanticAudit(audit);
+    } catch (err) {
+      setSemanticError(err instanceof Error ? err.message : 'Semantic audit failed');
+    } finally {
+      setAuditingSemantic(false);
     }
   };
 
@@ -325,18 +348,40 @@ export const ActionGateView: React.FC<ActionGateViewProps> = ({
             />
           </label>
 
-          <div className="pt-2 flex items-center justify-between gap-4">
+          <div className="pt-2 flex flex-wrap items-center justify-between gap-3">
             <span className="text-xs text-slate-500">
               Ingress Peer: <span className="font-mono">{ingress.peer_ip}</span>
+              {runtimeConfig && (
+                <>
+                  {' '}
+                  <span aria-hidden="true">·</span> Model:{' '}
+                  <span className="font-mono">{runtimeConfig.intentModel}</span>
+                </>
+              )}
             </span>
-            <button
-              type="submit"
-              disabled={submitting}
-              className="px-4 py-2 text-sm font-medium text-white bg-slate-900 hover:bg-slate-800 disabled:opacity-60 rounded-lg transition-colors whitespace-nowrap shrink-0 cursor-pointer"
-            >
-              {submitting ? 'Evaluating...' : 'Evaluate Action Boundary'}
-            </button>
+            <div className="flex items-center gap-2 shrink-0">
+              <button
+                type="button"
+                onClick={handleSemanticAudit}
+                disabled={auditingSemantic}
+                className="px-3.5 py-2 text-xs font-medium text-slate-800 bg-slate-100 hover:bg-slate-200 disabled:opacity-60 rounded-lg transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+              >
+                {auditingSemantic ? 'Auditing Intent...' : 'Semantic Intent Audit'}
+              </button>
+              <button
+                type="submit"
+                disabled={submitting}
+                className="px-4 py-2 text-sm font-medium text-white bg-slate-900 hover:bg-slate-800 disabled:opacity-60 rounded-lg transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+              >
+                {submitting ? 'Evaluating...' : 'Evaluate Action Boundary'}
+              </button>
+            </div>
           </div>
+          {evaluateError && (
+            <p className="p-3 rounded-lg border border-red-200 bg-red-50 text-xs text-red-700">
+              {evaluateError}
+            </p>
+          )}
         </form>
 
         {/* Right Panel: Deterministic Decision & Detector Signals */}
@@ -484,6 +529,42 @@ export const ActionGateView: React.FC<ActionGateViewProps> = ({
                   </div>
                 )}
               </div>
+              {/* Optional Semantic Intent Audit Escalation (Configured Server Model) */}
+              {(semanticAudit || semanticError) && (
+                <div className="pt-4 border-t border-slate-200">
+                  <div className="flex items-center justify-between gap-2 mb-2">
+                    <h3 className="text-xs font-semibold text-slate-900">
+                      Semantic Intent Escalation
+                    </h3>
+                    {semanticAudit && (
+                      <span className="font-mono text-[11px] text-slate-500 tabular-nums">
+                        {semanticAudit.model_id} · {semanticAudit.latency_ms} ms
+                      </span>
+                    )}
+                  </div>
+
+                  {semanticError ? (
+                    <p className="p-3 rounded-lg border border-red-200 bg-red-50 text-xs text-red-700">
+                      {semanticError}
+                    </p>
+                  ) : (
+                    semanticAudit && (
+                      <div className="p-3.5 rounded-lg border border-slate-200 bg-slate-50 space-y-1.5 text-xs">
+                        <div className="flex items-center justify-between font-mono">
+                          <span className="font-semibold text-slate-900">
+                            {semanticAudit.classification}
+                          </span>
+                          <span className="text-slate-700 tabular-nums">
+                            divergence {semanticAudit.intent_divergence_score.toFixed(2)} · hidden_directive:{' '}
+                            {String(semanticAudit.hidden_directive_detected)}
+                          </span>
+                        </div>
+                        <p className="text-slate-600">{semanticAudit.rationale}</p>
+                      </div>
+                    )
+                  )}
+                </div>
+              )}
             </>
           )}
         </div>

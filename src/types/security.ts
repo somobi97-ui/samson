@@ -194,3 +194,32 @@ export interface HarnessTestResult {
   attribution_confidence: string;
   latency_ms: number;
 }
+
+export interface SemanticAuditResult {
+  model_id: string;
+  thinking_level: string;
+  intent_divergence_score: number;
+  hidden_directive_detected: boolean;
+  classification: 'ALIGNED' | 'SUSPICIOUS_DRIFT' | 'HIJACKED_INTENT';
+  rationale: string;
+  latency_ms: number;
+}
+
+export interface PublicRuntimeConfig {
+  intentModel: string;
+  thinkingLevel: string;
+  aiConfigured: boolean;
+  detectorThresholds: {
+    trapThreshold: number;
+    blockThreshold: number;
+  };
+  defaultPolicy: SandboxPolicy;
+  imdsHost: string;
+  limits?: {
+    aiMaxPerMinute: number;
+    mutationMaxPerMinute: number;
+    maxAiInputChars: number;
+    maxAiOutputTokens: number;
+    hourlyTokenCap: number;
+  };
+}
