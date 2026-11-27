@@ -212,9 +212,15 @@ export interface PublicRuntimeConfig {
   detectorThresholds: {
     trapThreshold: number;
     blockThreshold: number;
+    classifierPatternWeight?: number;
   };
   defaultPolicy: SandboxPolicy;
   imdsHost: string;
+  sandboxExecutionMode?: 'deterministic' | 'docker';
+  edge?: {
+    allowedUpstreams: string[];
+    forwardTimeoutMs: number;
+  };
   limits?: {
     aiMaxPerMinute: number;
     mutationMaxPerMinute: number;
@@ -222,4 +228,89 @@ export interface PublicRuntimeConfig {
     maxAiOutputTokens: number;
     hourlyTokenCap: number;
   };
+}
+
+export type EndpointContainmentMode = 'monitor' | 'enforce_contain';
+
+export interface EndpointAgentRecord {
+  endpoint_id: string;
+  hostname: string;
+  platform: string;
+  pid: number | null;
+  version: string;
+  mode: EndpointContainmentMode;
+  watch_paths: string[];
+  status: 'online' | 'contained' | 'stale';
+  last_heartbeat: string;
+  local_alerts_count: number;
+  contained_actions_count: number;
+}
+
+export interface EndpointActivityEvent {
+  event_id: string;
+  endpoint_id: string;
+  hostname: string;
+  timestamp: string;
+  kind: 'file_access' | 'process_spawn' | 'network_probe' | 'canary_touch';
+  subject: string;
+  detail: string;
+  decision: GateDecision;
+  combined_risk: number;
+  containment_action: 'logged' | 'quarantined_file' | 'blocked_process' | 'revoked_local_token';
+  payload_hash: string;
+}
+
+export type EdgeTransitAction =
+  | 'FORWARD_UPSTREAM'
+  | 'REROUTED_TO_TRAP'
+  | 'BLOCKED_IN_TRANSIT';
+
+export interface EdgeInspectionRecord {
+  inspection_id: string;
+  timestamp: string;
+  method: string;
+  path: string;
+  upstream_host: string | null;
+  upstream_allowed: boolean;
+  forwarded: boolean;
+  upstream_status: number | null;
+  edge_action: EdgeTransitAction;
+  evaluation: ActionGateEvaluation;
+  linked_trap_session_id?: string;
+  attribution?: AttributionFinding;
+}
+
+export interface ApplianceStatus {
+  mode: 'standalone-appliance';
+  node_version: string;
+  platform: string;
+  uptime_sec: number;
+  sandbox_execution_mode: 'deterministic' | 'docker';
+  docker_cli_available: boolean;
+  stored_records: {
+    evaluations: number;
+    quarantine_queue: number;
+    trap_sessions: number;
+    endpoints: number;
+    edge_logs: number;
+    max_cap: number;
+  };
+  recent_incidents_count: number;
+}
+
+export interface CliScanFinding {
+  file: string;
+  line: number;
+  severity: 'medium' | 'high' | 'critical';
+  rule: string;
+  summary: string;
+}
+
+export interface CliScanReport {
+  scanned_at: string;
+  target_path: string;
+  files_scanned: number;
+  passed: boolean;
+  findings: CliScanFinding[];
+  config_warnings: string[];
 }

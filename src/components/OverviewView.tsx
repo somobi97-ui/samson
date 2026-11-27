@@ -8,22 +8,64 @@ import {
 } from 'lucide-react';
 import type {
   ActionGateEvaluation,
+  ApplianceStatus,
+  CliScanReport,
+  EdgeInspectionRecord,
+  EndpointActivityEvent,
+  EndpointAgentRecord,
+  EndpointContainmentMode,
   GateDecision,
+  PublicRuntimeConfig,
   QuarantineQueueItem,
   TrapSessionRecord,
 } from '../types/security';
+import {
+  DeploymentControlPanel,
+  type OverviewSubTab,
+} from './DeploymentControlPanel';
 import type { WorkspaceView } from './TopNav';
 
 interface OverviewViewProps {
   evaluations: ActionGateEvaluation[];
   quarantineQueue: QuarantineQueueItem[];
   trapSessions: TrapSessionRecord[];
+  endpoints: EndpointAgentRecord[];
+  endpointEvents: EndpointActivityEvent[];
+  edgeLogs: EdgeInspectionRecord[];
+  applianceStatus: ApplianceStatus | null;
+  runtimeConfig: PublicRuntimeConfig | null;
   onNavigate: (view: WorkspaceView) => void;
   onSelectSession: (sessionId: string) => void;
   onResolveQuarantine: (
     id: string,
     action: 'route_to_trap' | 'approve_once' | 'revoke',
   ) => Promise<void>;
+  onToggleEndpointMode: (
+    endpointId: string,
+    mode: EndpointContainmentMode,
+  ) => Promise<void>;
+  onSimulateEndpointEvent: (params: {
+    endpoint_id: string;
+    kind: EndpointActivityEvent['kind'];
+    subject: string;
+    detail: string;
+  }) => Promise<void>;
+  onInterceptEdgeTraffic: (params: {
+    method: string;
+    path: string;
+    agent_id: string;
+    user_goal: string;
+    tool_name: string;
+    upstream_url: string;
+    raw_payload: string;
+  }) => Promise<EdgeInspectionRecord>;
+  onUpdateRuntimePolicy: (patch: {
+    trapThreshold: number;
+    blockThreshold: number;
+    classifierPatternWeight: number;
+    allowedUpstreams: string[];
+  }) => Promise<void>;
+  onRunCliScan: () => Promise<CliScanReport>;
 }
 
 const DECISION_LABELS: Record<GateDecision, string> = {
@@ -61,10 +103,21 @@ export const OverviewView: React.FC<OverviewViewProps> = ({
   evaluations,
   quarantineQueue,
   trapSessions,
+  endpoints,
+  endpointEvents,
+  edgeLogs,
+  applianceStatus,
+  runtimeConfig,
   onNavigate,
   onSelectSession,
   onResolveQuarantine,
+  onToggleEndpointMode,
+  onSimulateEndpointEvent,
+  onInterceptEdgeTraffic,
+  onUpdateRuntimePolicy,
+  onRunCliScan,
 }) => {
+  const [subTab, setSubTab] = useState<OverviewSubTab>('control-plane');
   const [searchQuery, setSearchQuery] = useState('');
   const [decisionFilter, setDecisionFilter] = useState<'ALL' | GateDecision>('ALL');
   const [busyId, setBusyId] = useState<string | null>(null);
@@ -240,8 +293,50 @@ export const OverviewView: React.FC<OverviewViewProps> = ({
         </div>
       </section>
 
-      {/* Human-in-the-Loop Quarantine Queue */}
-      <section className="bg-white border border-slate-200 rounded-xl p-6">
+      {/* Deployment Surfaces & Policy Mode Switcher */}
+      <div className="flex flex-wrap items-center gap-1 p-1 bg-slate-200/70 rounded-lg w-fit">
+        {(
+          [
+            ['control-plane', 'Control Plane'],
+            ['local-endpoints', 'Local Endpoints'],
+            ['edge-proxy', 'Edge Proxy'],
+            ['appliance-policy', 'Appliance & Policy'],
+            ['cli-pipeline', 'CLI & Pipeline'],
+          ] as const
+        ).map(([id, label]) => (
+          <button
+            key={id}
+            type="button"
+            onClick={() => setSubTab(id)}
+            className={`px-3 py-1.5 text-xs font-medium rounded-md transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
+              subTab === id
+                ? 'bg-white text-slate-900 shadow-sm'
+                : 'text-slate-600 hover:text-slate-900'
+            }`}
+          >
+            {label}
+          </button>
+        ))}
+      </div>
+
+      {subTab !== 'control-plane' ? (
+        <DeploymentControlPanel
+          activeTab={subTab}
+          endpoints={endpoints}
+          endpointEvents={endpointEvents}
+          edgeLogs={edgeLogs}
+          applianceStatus={applianceStatus}
+          runtimeConfig={runtimeConfig}
+          onToggleEndpointMode={onToggleEndpointMode}
+          onSimulateEndpointEvent={onSimulateEndpointEvent}
+          onInterceptEdgeTraffic={onInterceptEdgeTraffic}
+          onUpdateRuntimePolicy={onUpdateRuntimePolicy}
+          onRunCliScan={onRunCliScan}
+        />
+      ) : (
+        <>
+          {/* Human-in-the-Loop Quarantine Queue */}
+          <section className="bg-white border border-slate-200 rounded-xl p-6">
         <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 pb-4 border-b border-slate-200">
           <div>
             <h2 className="text-base font-semibold text-slate-900">
@@ -457,6 +552,8 @@ export const OverviewView: React.FC<OverviewViewProps> = ({
           </table>
         </div>
       </section>
+        </>
+      )}
     </div>
   );
 };

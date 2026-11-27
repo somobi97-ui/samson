@@ -14,7 +14,13 @@ import {
 import type {
   ActionGateEvaluation,
   AgentBaseline,
+  ApplianceStatus,
   AttributionFinding,
+  CliScanReport,
+  EdgeInspectionRecord,
+  EndpointActivityEvent,
+  EndpointAgentRecord,
+  EndpointContainmentMode,
   HarnessScenario,
   HarnessTestResult,
   IngressProvenance,
@@ -37,6 +43,10 @@ export default function App() {
   const [scenarios, setScenarios] = useState<HarnessScenario[]>([]);
   const [defaultPolicy, setDefaultPolicy] = useState<SandboxPolicy | null>(null);
   const [runtimeConfig, setRuntimeConfig] = useState<PublicRuntimeConfig | null>(null);
+  const [endpoints, setEndpoints] = useState<EndpointAgentRecord[]>([]);
+  const [endpointEvents, setEndpointEvents] = useState<EndpointActivityEvent[]>([]);
+  const [edgeLogs, setEdgeLogs] = useState<EdgeInspectionRecord[]>([]);
+  const [applianceStatus, setApplianceStatus] = useState<ApplianceStatus | null>(null);
 
   const [selectedSessionId, setSelectedSessionId] = useState<string | null>(null);
   const [selectedScenario, setSelectedScenario] = useState<HarnessScenario | null>(null);
@@ -72,6 +82,10 @@ export default function App() {
       setScenarios(data.scenarios);
       setDefaultPolicy(data.defaultPolicy ?? null);
       setRuntimeConfig(data.runtimeConfig ?? null);
+      setEndpoints(data.endpoints ?? []);
+      setEndpointEvents(data.endpointEvents ?? []);
+      setEdgeLogs(data.edgeLogs ?? []);
+      setApplianceStatus(data.applianceStatus ?? null);
       if (data.trapSessions.length > 0) {
         setSelectedSessionId((prev) => prev ?? data.trapSessions[0].session_id);
       }
@@ -159,6 +173,56 @@ export default function App() {
     }
   };
 
+  const handleToggleEndpointMode = async (
+    endpointId: string,
+    mode: EndpointContainmentMode,
+  ) => {
+    const data = await sentinelService.updateEndpointPolicy(endpointId, mode);
+    setEndpoints((prev) => prev.map((e) => (e.endpoint_id === endpointId ? data.endpoint : e)));
+  };
+
+  const handleSimulateEndpointEvent = async (params: {
+    endpoint_id: string;
+    kind: EndpointActivityEvent['kind'];
+    subject: string;
+    detail: string;
+  }) => {
+    const data = await sentinelService.sendEndpointEvent(params);
+    setEndpointEvents((prev) => [data.event, ...prev]);
+    // Refresh endpoints so counters reflect the latest event
+    await loadPlatformState();
+  };
+
+  const handleInterceptEdgeTraffic = async (params: {
+    method: string;
+    path: string;
+    agent_id: string;
+    user_goal: string;
+    tool_name: string;
+    upstream_url: string;
+    raw_payload: string;
+  }): Promise<EdgeInspectionRecord> => {
+    const data = await sentinelService.interceptEdgeTraffic(params);
+    setEdgeLogs((prev) => [data.record, ...prev]);
+    setEvaluations((prev) => [data.record.evaluation, ...prev]);
+    return data.record;
+  };
+
+  const handleUpdateRuntimePolicy = async (patch: {
+    trapThreshold: number;
+    blockThreshold: number;
+    classifierPatternWeight: number;
+    allowedUpstreams: string[];
+  }) => {
+    const data = await sentinelService.updateRuntimePolicy(patch);
+    setRuntimeConfig(data.runtimeConfig);
+  };
+
+  const handleRunCliScan = async (): Promise<CliScanReport> => {
+    const data = await sentinelService.runCliScan();
+    return data.report;
+  };
+
   return (
     <div className="min-h-screen bg-slate-50 text-slate-900 flex flex-col">
       <TopNav
@@ -219,12 +283,22 @@ export default function App() {
                     evaluations={evaluations}
                     quarantineQueue={quarantineQueue}
                     trapSessions={trapSessions}
+                    endpoints={endpoints}
+                    endpointEvents={endpointEvents}
+                    edgeLogs={edgeLogs}
+                    applianceStatus={applianceStatus}
+                    runtimeConfig={runtimeConfig}
                     onNavigate={setActiveView}
                     onSelectSession={(id) => {
                       setSelectedSessionId(id);
                       setSandboxDraft(null);
                     }}
                     onResolveQuarantine={handleResolveQuarantine}
+                    onToggleEndpointMode={handleToggleEndpointMode}
+                    onSimulateEndpointEvent={handleSimulateEndpointEvent}
+                    onInterceptEdgeTraffic={handleInterceptEdgeTraffic}
+                    onUpdateRuntimePolicy={handleUpdateRuntimePolicy}
+                    onRunCliScan={handleRunCliScan}
                   />
                 )}
 

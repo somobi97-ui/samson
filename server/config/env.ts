@@ -118,13 +118,58 @@ export const serverConfig = {
   sandbox: {
     defaultPolicy: defaultSandboxPolicy,
     imdsHost: envString('SANDBOX_IMDS_HOST', '169.254.169.254'),
+    executionMode:
+      envString('SANDBOX_EXECUTION_MODE', 'deterministic') === 'docker'
+        ? ('docker' as const)
+        : ('deterministic' as const),
   },
   detector: {
     trapThreshold: envFraction('DETECTOR_TRAP_THRESHOLD', 0.35, 0.05, 0.95),
     blockThreshold: envFraction('DETECTOR_BLOCK_THRESHOLD', 0.72, 0.2, 0.99),
     classifierPatternWeight: envFraction('DETECTOR_PATTERN_WEIGHT', 0.35, 0.1, 1.0),
   },
+  edge: {
+    allowedUpstreams: envString('EDGE_ALLOWED_UPSTREAMS', 'api.openai.com,generativelanguage.googleapis.com,mcp-tools.example.com')
+      .split(',')
+      .map((s) => s.trim().toLowerCase())
+      .filter(Boolean),
+    forwardTimeoutMs: envNumber('EDGE_FORWARD_TIMEOUT_MS', 8000, 1000, 30000),
+    defaultUpstream: envString('EDGE_DEFAULT_UPSTREAM', ''),
+  },
 };
+
+export function updateRuntimePolicy(patch: {
+  trapThreshold?: number;
+  blockThreshold?: number;
+  classifierPatternWeight?: number;
+  defaultPolicy?: Partial<SandboxPolicy>;
+  allowedUpstreams?: string[];
+}) {
+  if (typeof patch.trapThreshold === 'number' && Number.isFinite(patch.trapThreshold)) {
+    serverConfig.detector.trapThreshold = Math.min(0.95, Math.max(0.05, patch.trapThreshold));
+  }
+  if (typeof patch.blockThreshold === 'number' && Number.isFinite(patch.blockThreshold)) {
+    serverConfig.detector.blockThreshold = Math.min(0.99, Math.max(0.2, patch.blockThreshold));
+  }
+  if (
+    typeof patch.classifierPatternWeight === 'number' &&
+    Number.isFinite(patch.classifierPatternWeight)
+  ) {
+    serverConfig.detector.classifierPatternWeight = Math.min(
+      1.0,
+      Math.max(0.1, patch.classifierPatternWeight),
+    );
+  }
+  if (patch.defaultPolicy) {
+    Object.assign(serverConfig.sandbox.defaultPolicy, patch.defaultPolicy);
+  }
+  if (Array.isArray(patch.allowedUpstreams)) {
+    serverConfig.edge.allowedUpstreams = patch.allowedUpstreams
+      .map((u) => u.trim().toLowerCase())
+      .filter((u) => /^[a-z0-9.-]{3,128}$/.test(u));
+  }
+  return getPublicRuntimeConfig();
+}
 
 export function getPublicRuntimeConfig() {
   return {
@@ -134,9 +179,15 @@ export function getPublicRuntimeConfig() {
     detectorThresholds: {
       trapThreshold: serverConfig.detector.trapThreshold,
       blockThreshold: serverConfig.detector.blockThreshold,
+      classifierPatternWeight: serverConfig.detector.classifierPatternWeight,
     },
     defaultPolicy: serverConfig.sandbox.defaultPolicy,
     imdsHost: serverConfig.sandbox.imdsHost,
+    sandboxExecutionMode: serverConfig.sandbox.executionMode,
+    edge: {
+      allowedUpstreams: serverConfig.edge.allowedUpstreams,
+      forwardTimeoutMs: serverConfig.edge.forwardTimeoutMs,
+    },
     limits: {
       aiMaxPerMinute: serverConfig.limits.aiMax,
       mutationMaxPerMinute: serverConfig.limits.mutationMax,

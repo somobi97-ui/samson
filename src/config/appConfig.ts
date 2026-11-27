@@ -44,6 +44,15 @@ export const appConfig = {
       `${apiBase}/sessions/${encodeURIComponent(id)}/telemetry.jsonl`,
     sessionAttribution: (id: string) =>
       `${apiBase}/sessions/${encodeURIComponent(id)}/attribution.json`,
+    endpointsList: `${apiBase}/endpoints`,
+    endpointEvent: `${apiBase}/endpoints/event`,
+    endpointPolicy: (id: string) =>
+      `${apiBase}/endpoints/${encodeURIComponent(id)}/policy`,
+    edgeLogs: `${apiBase}/edge/logs`,
+    edgeIntercept: `${apiBase}/edge/intercept`,
+    applianceStatus: `${apiBase}/appliance/status`,
+    policyUpdate: `${apiBase}/config/policy`,
+    cliScan: `${apiBase}/cli/scan`,
   },
   sandboxRuntimes: [
     { value: 'gvisor-runsc' as SandboxRuntime, label: 'gVisor (--runtime=runsc)' },

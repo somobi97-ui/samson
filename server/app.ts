@@ -3,13 +3,31 @@ import express, { type NextFunction, type Request, type Response } from 'express
 import type {
   ActionGateEvaluation,
   AgentBaseline,
+  EdgeInspectionRecord,
+  EndpointActivityEvent,
+  EndpointAgentRecord,
   QuarantineQueueItem,
   SemanticAuditResult,
   TrapSessionRecord,
 } from '../src/types/security.ts';
-import { getPublicRuntimeConfig, serverConfig } from './config/env.ts';
+import { scanDirectoryForRisks } from '../cli/scanner.ts';
+import {
+  getPublicRuntimeConfig,
+  serverConfig,
+  updateRuntimePolicy,
+} from './config/env.ts';
+import { getApplianceStatus } from './engine/appliance.ts';
 import { buildAttributionReport } from './engine/attribution.ts';
 import { evaluateActionBoundary } from './engine/detector.ts';
+import {
+  extractEdgeIngress,
+  inspectAndRouteEdgeRequest,
+} from './engine/edgeProxy.ts';
+import {
+  buildSeededEndpoints,
+  evaluateEndpointActivity,
+  normalizeEndpointMode,
+} from './engine/endpointMonitor.ts';
 import {
   ADVERSARIAL_HARNESS_SCENARIOS,
   DEFAULT_AGENT_BASELINES,
@@ -25,7 +43,11 @@ import { hashIdentifier, logger } from './services/logger.ts';
 import {
   SAFE_ID_REGEX,
   validateAttributionPayload,
+  validateEdgeInterceptPayload,
+  validateEndpointEventPayload,
+  validateEndpointRegisterPayload,
   validateEvaluatePayload,
+  validatePolicyUpdatePayload,
   validateQuarantineResolvePayload,
   validateSandboxPayload,
   validateSemanticAuditPayload,
@@ -56,6 +78,10 @@ export function createApiApp(options?: CreateApiAppOptions) {
   const evaluations: ActionGateEvaluation[] = [];
   const quarantineQueue: QuarantineQueueItem[] = [];
   const trapSessions: TrapSessionRecord[] = [];
+  const seededEndpoints = buildSeededEndpoints();
+  const endpoints: EndpointAgentRecord[] = [...seededEndpoints.endpoints];
+  const endpointEvents: EndpointActivityEvent[] = [...seededEndpoints.events];
+  const edgeLogs: EdgeInspectionRecord[] = [];
 
   function seedInitialTelemetry() {
     const seedIndices = [1, 0, 2, 5];
@@ -181,6 +207,16 @@ export function createApiApp(options?: CreateApiAppOptions) {
       scenarios: ADVERSARIAL_HARNESS_SCENARIOS,
       defaultPolicy: DEFAULT_SANDBOX_POLICY,
       runtimeConfig: getPublicRuntimeConfig(),
+      endpoints: endpoints.slice(0, 50),
+      endpointEvents: endpointEvents.slice(0, 50),
+      edgeLogs: edgeLogs.slice(0, 50),
+      applianceStatus: getApplianceStatus({
+        evaluations: evaluations.length,
+        quarantine_queue: quarantineQueue.length,
+        trap_sessions: trapSessions.length,
+        endpoints: endpoints.length,
+        edge_logs: edgeLogs.length,
+      }),
     });
   });
 
@@ -418,6 +454,231 @@ export function createApiApp(options?: CreateApiAppOptions) {
       `attachment; filename="${session.session_id}_attribution_report.json"`,
     );
     return res.send(JSON.stringify(session.attribution, null, 2));
+  });
+
+  // 1. Local Agent / Endpoint Client Management & Telemetry
+  app.get('/api/endpoints', generalLimiter, (_req, res) => {
+    res.json({
+      endpoints: endpoints.slice(0, 50),
+      events: endpointEvents.slice(0, 50),
+    });
+  });
+
+  app.post('/api/endpoints/register', mutationLimiter, defaultJsonParser, (req: RequestWithId, res) => {
+    const validated = validateEndpointRegisterPayload(req.body);
+    if (!validated.ok) {
+      return res.status(400).json({ error: validated.error });
+    }
+    const now = new Date().toISOString();
+    const existing = endpoints.find((e) => e.endpoint_id === validated.data.endpoint_id);
+    if (existing) {
+      existing.hostname = validated.data.hostname;
+      existing.platform = validated.data.platform;
+      existing.pid = validated.data.pid;
+      existing.version = validated.data.version;
+      existing.watch_paths = validated.data.watch_paths;
+      existing.last_heartbeat = now;
+      existing.status = 'online';
+      return res.json({ endpoint: existing });
+    }
+
+    const created: EndpointAgentRecord = {
+      ...validated.data,
+      status: 'online',
+      last_heartbeat: now,
+      local_alerts_count: 0,
+      contained_actions_count: 0,
+    };
+    pushBounded(endpoints, created);
+    logger.info('endpoint.registered', {
+      requestId: req.requestId,
+      endpoint_id: created.endpoint_id,
+      platform: created.platform,
+      mode: created.mode,
+    });
+    return res.json({ endpoint: created });
+  });
+
+  app.post('/api/endpoints/event', mutationLimiter, defaultJsonParser, (req: RequestWithId, res) => {
+    const validated = validateEndpointEventPayload(req.body);
+    if (!validated.ok) {
+      return res.status(400).json({ error: validated.error });
+    }
+    let endpoint = endpoints.find((e) => e.endpoint_id === validated.data.endpoint_id);
+    if (!endpoint) {
+      endpoint = {
+        endpoint_id: validated.data.endpoint_id,
+        hostname: 'registered-endpoint',
+        platform: 'linux',
+        pid: null,
+        version: '1.0.0',
+        mode: 'enforce_contain',
+        watch_paths: [],
+        status: 'online',
+        last_heartbeat: new Date().toISOString(),
+        local_alerts_count: 0,
+        contained_actions_count: 0,
+      };
+      pushBounded(endpoints, endpoint);
+    }
+
+    const result = evaluateEndpointActivity({
+      endpoint,
+      kind: validated.data.kind,
+      subject: validated.data.subject,
+      detail: validated.data.detail,
+      baseline: baselines[0],
+    });
+
+    endpoint.last_heartbeat = result.event.timestamp;
+    if (result.event.decision !== 'ALLOW_LOG') {
+      endpoint.local_alerts_count += 1;
+    }
+    if (result.local_directive !== 'allow') {
+      endpoint.contained_actions_count += 1;
+      endpoint.status = 'contained';
+    }
+    pushBounded(endpointEvents, result.event);
+
+    logger.info('endpoint.event', {
+      requestId: req.requestId,
+      endpoint_id: endpoint.endpoint_id,
+      kind: result.event.kind,
+      decision: result.event.decision,
+      directive: result.local_directive,
+    });
+
+    return res.json(result);
+  });
+
+  app.post('/api/endpoints/:id/policy', mutationLimiter, defaultJsonParser, (req: RequestWithId, res) => {
+    const id = typeof req.params.id === 'string' ? req.params.id.slice(0, 64) : '';
+    if (!SAFE_ID_REGEX.test(id)) {
+      return res.status(400).json({ error: 'Invalid endpoint ID format.' });
+    }
+    const endpoint = endpoints.find((e) => e.endpoint_id === id);
+    if (!endpoint) {
+      return res.status(404).json({ error: 'Endpoint agent not found.' });
+    }
+    const mode = normalizeEndpointMode((req.body as { mode?: unknown })?.mode);
+    endpoint.mode = mode;
+    logger.info('endpoint.policy_updated', { requestId: req.requestId, endpoint_id: id, mode });
+    return res.json({ endpoint });
+  });
+
+  // 2. Inline Cloud / Edge Proxy Inspection & Routing
+  app.get('/api/edge/logs', generalLimiter, (_req, res) => {
+    res.json({
+      logs: edgeLogs.slice(0, 50),
+      allowedUpstreams: serverConfig.edge.allowedUpstreams,
+    });
+  });
+
+  app.post('/api/edge/intercept', mutationLimiter, defaultJsonParser, async (req: RequestWithId, res) => {
+    const validated = validateEdgeInterceptPayload(req.body);
+    if (!validated.ok) {
+      return res.status(400).json({ error: validated.error });
+    }
+
+    const clientIp = (req.ip || req.socket.remoteAddress || 'unknown').replace(/^::ffff:/, '');
+    const ingress =
+      validated.data.ingress ??
+      extractEdgeIngress(req.headers, clientIp);
+    const baseline = baselines.find((b) => b.agent_id === validated.data.agent_id) ?? baselines[0];
+
+    const outcome = await inspectAndRouteEdgeRequest({
+      method: validated.data.method,
+      path: validated.data.path,
+      agent_id: validated.data.agent_id,
+      user_goal: validated.data.user_goal,
+      tool_name: validated.data.tool_name,
+      upstream_url: validated.data.upstream_url || undefined,
+      raw_payload: validated.data.raw_payload,
+      ingress,
+      forward: validated.data.forward,
+      baseline,
+      recordEvaluation: (ev) => pushBounded(evaluations, ev),
+      recordQuarantine: (item) => pushBounded(quarantineQueue, item),
+      recordTrapSession: (session) => pushBounded(trapSessions, session),
+    });
+
+    pushBounded(edgeLogs, outcome.record);
+    logger.info('edge.intercepted', {
+      requestId: req.requestId,
+      inspection_id: outcome.record.inspection_id,
+      edge_action: outcome.record.edge_action,
+      upstream_allowed: outcome.record.upstream_allowed,
+    });
+
+    return res.status(outcome.statusCode).json({ record: outcome.record });
+  });
+
+  app.all('/api/edge/gateway*', mutationLimiter, defaultJsonParser, async (req: RequestWithId, res) => {
+    const clientIp = (req.ip || req.socket.remoteAddress || 'unknown').replace(/^::ffff:/, '');
+    const ingress = extractEdgeIngress(req.headers, clientIp);
+    const upstreamHeader = req.header('x-sentinel-upstream') || serverConfig.edge.defaultUpstream;
+    const rawBody =
+      req.body && typeof req.body === 'object' ? JSON.stringify(req.body) : String(req.body ?? '');
+
+    const outcome = await inspectAndRouteEdgeRequest({
+      method: req.method,
+      path: req.path.replace(/^\/api\/edge\/gateway/, '') || '/',
+      agent_id: req.header('x-agent-id')?.slice(0, 64) || 'agent-triage-01',
+      user_goal: req.header('x-user-goal')?.slice(0, 300) || 'Edge gateway proxy request',
+      tool_name: req.header('x-tool-name')?.slice(0, 64) || 'http_request',
+      upstream_url: upstreamHeader || undefined,
+      raw_payload: rawBody.slice(0, 16000),
+      ingress,
+      forward: Boolean(upstreamHeader),
+      baseline: baselines[0],
+      recordEvaluation: (ev) => pushBounded(evaluations, ev),
+      recordQuarantine: (item) => pushBounded(quarantineQueue, item),
+      recordTrapSession: (session) => pushBounded(trapSessions, session),
+    });
+
+    pushBounded(edgeLogs, outcome.record);
+    return res.status(outcome.statusCode).json({ record: outcome.record });
+  });
+
+  // 3. Standalone Appliance Status & Live Policy Configuration
+  app.get('/api/appliance/status', generalLimiter, (_req, res) => {
+    res.json({
+      appliance: getApplianceStatus({
+        evaluations: evaluations.length,
+        quarantine_queue: quarantineQueue.length,
+        trap_sessions: trapSessions.length,
+        endpoints: endpoints.length,
+        edge_logs: edgeLogs.length,
+      }),
+      runtimeConfig: getPublicRuntimeConfig(),
+    });
+  });
+
+  app.patch('/api/config/policy', mutationLimiter, defaultJsonParser, (req: RequestWithId, res) => {
+    const validated = validatePolicyUpdatePayload(req.body);
+    if (!validated.ok) {
+      return res.status(400).json({ error: validated.error });
+    }
+    const nextTrap = validated.data.trapThreshold ?? serverConfig.detector.trapThreshold;
+    const nextBlock = validated.data.blockThreshold ?? serverConfig.detector.blockThreshold;
+    if (nextBlock <= nextTrap) {
+      return res.status(400).json({
+        error: `blockThreshold (${nextBlock}) must exceed trapThreshold (${nextTrap}).`,
+      });
+    }
+    const updated = updateRuntimePolicy(validated.data);
+    logger.info('appliance.policy_updated', {
+      requestId: req.requestId,
+      trapThreshold: updated.detectorThresholds.trapThreshold,
+      blockThreshold: updated.detectorThresholds.blockThreshold,
+    });
+    return res.json({ runtimeConfig: updated });
+  });
+
+  // 4. Pre-Deployment CLI / Pipeline Scan Trigger
+  app.post('/api/cli/scan', mutationLimiter, defaultJsonParser, (_req, res) => {
+    const report = scanDirectoryForRisks(process.cwd());
+    res.json({ report });
   });
 
   // Return JSON 404 for unknown /api routes so SPA fallback never serves HTML to API clients

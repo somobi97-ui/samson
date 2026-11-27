@@ -724,3 +724,250 @@ export function validateStructuredModelOutput(
     },
   };
 }
+
+export interface ValidatedEndpointRegisterInput {
+  endpoint_id: string;
+  hostname: string;
+  platform: string;
+  pid: number | null;
+  version: string;
+  mode: 'monitor' | 'enforce_contain';
+  watch_paths: string[];
+}
+
+export function validateEndpointRegisterPayload(
+  body: unknown,
+): ValidationResult<ValidatedEndpointRegisterInput> {
+  if (!isPlainObject(body)) {
+    return { ok: false, error: 'Request body must be a JSON object.' };
+  }
+  const idRes = readRequiredString(body, 'endpoint_id', 4, 64);
+  if (!idRes.ok) return idRes;
+  if (!SAFE_ID_REGEX.test(idRes.data)) {
+    return { ok: false, error: 'Field "endpoint_id" must match [a-zA-Z0-9_-]{4,64}.' };
+  }
+
+  const hostRes = readOptionalString(body, 'hostname', 'local-host', 128);
+  if (!hostRes.ok) return hostRes;
+  const platRes = readOptionalString(body, 'platform', 'linux', 32);
+  if (!platRes.ok) return platRes;
+  const verRes = readOptionalString(body, 'version', '1.0.0', 32);
+  if (!verRes.ok) return verRes;
+
+  let pid: number | null = null;
+  if (body.pid !== undefined && body.pid !== null) {
+    const pidRes = readBoundedInt(body.pid, 'pid', 1, 1, 4194304);
+    if (!pidRes.ok) return pidRes;
+    pid = pidRes.data;
+  }
+
+  const mode = body.mode === 'enforce_contain' ? 'enforce_contain' : 'monitor';
+  const watch_paths: string[] = [];
+  if (body.watch_paths !== undefined) {
+    if (!Array.isArray(body.watch_paths)) {
+      return { ok: false, error: 'Field "watch_paths" must be an array of strings.' };
+    }
+    for (const p of body.watch_paths.slice(0, 12)) {
+      if (typeof p !== 'string' || !p.trim()) {
+        return { ok: false, error: 'Each entry in "watch_paths" must be a non-empty string.' };
+      }
+      watch_paths.push(stripControlChars(p).trim().slice(0, 256));
+    }
+  }
+
+  return {
+    ok: true,
+    data: {
+      endpoint_id: idRes.data,
+      hostname: hostRes.data.trim() || 'local-host',
+      platform: platRes.data.trim() || 'linux',
+      pid,
+      version: verRes.data.trim() || '1.0.0',
+      mode,
+      watch_paths,
+    },
+  };
+}
+
+export interface ValidatedEndpointEventInput {
+  endpoint_id: string;
+  kind: 'file_access' | 'process_spawn' | 'network_probe' | 'canary_touch';
+  subject: string;
+  detail: string;
+}
+
+const VALID_ENDPOINT_KINDS = new Set([
+  'file_access',
+  'process_spawn',
+  'network_probe',
+  'canary_touch',
+]);
+
+export function validateEndpointEventPayload(
+  body: unknown,
+): ValidationResult<ValidatedEndpointEventInput> {
+  if (!isPlainObject(body)) {
+    return { ok: false, error: 'Request body must be a JSON object.' };
+  }
+  const idRes = readRequiredString(body, 'endpoint_id', 4, 64);
+  if (!idRes.ok) return idRes;
+  if (!SAFE_ID_REGEX.test(idRes.data)) {
+    return { ok: false, error: 'Field "endpoint_id" must match [a-zA-Z0-9_-]{4,64}.' };
+  }
+
+  const kind = body.kind;
+  if (typeof kind !== 'string' || !VALID_ENDPOINT_KINDS.has(kind)) {
+    return {
+      ok: false,
+      error: 'Field "kind" must be file_access, process_spawn, network_probe, or canary_touch.',
+    };
+  }
+
+  const subjectRes = readRequiredString(body, 'subject', 1, 512);
+  if (!subjectRes.ok) return subjectRes;
+  const detailRes = readRequiredString(body, 'detail', 1, 2000);
+  if (!detailRes.ok) return detailRes;
+
+  return {
+    ok: true,
+    data: {
+      endpoint_id: idRes.data,
+      kind: kind as ValidatedEndpointEventInput['kind'],
+      subject: subjectRes.data,
+      detail: detailRes.data,
+    },
+  };
+}
+
+export interface ValidatedEdgeInterceptInput {
+  method: string;
+  path: string;
+  agent_id: string;
+  user_goal: string;
+  tool_name: string;
+  upstream_url: string;
+  raw_payload: string;
+  forward: boolean;
+  ingress?: IngressProvenance;
+}
+
+export function validateEdgeInterceptPayload(
+  body: unknown,
+): ValidationResult<ValidatedEdgeInterceptInput> {
+  if (!isPlainObject(body)) {
+    return { ok: false, error: 'Request body must be a JSON object.' };
+  }
+  const methodRes = readOptionalString(body, 'method', 'POST', 12);
+  if (!methodRes.ok) return methodRes;
+  const method = methodRes.data.trim().toUpperCase();
+  if (!['GET', 'POST', 'PUT', 'PATCH', 'DELETE'].includes(method)) {
+    return { ok: false, error: 'Field "method" must be GET, POST, PUT, PATCH, or DELETE.' };
+  }
+
+  const pathRes = readOptionalString(body, 'path', '/v1/tools/invoke', 256);
+  if (!pathRes.ok) return pathRes;
+  const agentRes = readOptionalString(body, 'agent_id', 'agent-triage-01', 64);
+  if (!agentRes.ok) return agentRes;
+  const agent_id = agentRes.data.trim() || 'agent-triage-01';
+  if (!SAFE_AGENT_ID_REGEX.test(agent_id)) {
+    return { ok: false, error: 'Field "agent_id" must be 2-64 alphanumeric/._- characters.' };
+  }
+
+  const goalRes = readRequiredString(body, 'user_goal', 1, 1000);
+  if (!goalRes.ok) return goalRes;
+  const toolRes = readRequiredString(body, 'tool_name', 1, 64);
+  if (!toolRes.ok) return toolRes;
+  if (!SAFE_TOOL_REGEX.test(toolRes.data)) {
+    return { ok: false, error: 'Field "tool_name" contains invalid characters.' };
+  }
+
+  const upstreamRes = readOptionalString(body, 'upstream_url', '', 512);
+  if (!upstreamRes.ok) return upstreamRes;
+  const payloadRes = readOptionalString(body, 'raw_payload', '', 16000);
+  if (!payloadRes.ok) return payloadRes;
+
+  let ingress: IngressProvenance | undefined;
+  if (body.ingress !== undefined) {
+    const ingRes = validateIngressPayload(body.ingress);
+    if (!ingRes.ok) return ingRes;
+    ingress = ingRes.data;
+  }
+
+  return {
+    ok: true,
+    data: {
+      method,
+      path: pathRes.data.trim() || '/v1/tools/invoke',
+      agent_id,
+      user_goal: goalRes.data,
+      tool_name: toolRes.data,
+      upstream_url: upstreamRes.data.trim(),
+      raw_payload: payloadRes.data,
+      forward: body.forward === true,
+      ingress,
+    },
+  };
+}
+
+export interface ValidatedPolicyPatchInput {
+  trapThreshold?: number;
+  blockThreshold?: number;
+  classifierPatternWeight?: number;
+  allowedUpstreams?: string[];
+}
+
+export function validatePolicyUpdatePayload(
+  body: unknown,
+): ValidationResult<ValidatedPolicyPatchInput> {
+  if (!isPlainObject(body)) {
+    return { ok: false, error: 'Request body must be a JSON object.' };
+  }
+  const patch: ValidatedPolicyPatchInput = {};
+
+  if (body.trapThreshold !== undefined) {
+    const val = Number(body.trapThreshold);
+    if (!Number.isFinite(val) || val < 0.05 || val > 0.95) {
+      return { ok: false, error: 'Field "trapThreshold" must be between 0.05 and 0.95.' };
+    }
+    patch.trapThreshold = Number(val.toFixed(2));
+  }
+  if (body.blockThreshold !== undefined) {
+    const val = Number(body.blockThreshold);
+    if (!Number.isFinite(val) || val < 0.2 || val > 0.99) {
+      return { ok: false, error: 'Field "blockThreshold" must be between 0.20 and 0.99.' };
+    }
+    patch.blockThreshold = Number(val.toFixed(2));
+  }
+  if (body.classifierPatternWeight !== undefined) {
+    const val = Number(body.classifierPatternWeight);
+    if (!Number.isFinite(val) || val < 0.1 || val > 1.0) {
+      return { ok: false, error: 'Field "classifierPatternWeight" must be between 0.10 and 1.00.' };
+    }
+    patch.classifierPatternWeight = Number(val.toFixed(2));
+  }
+
+  if (
+    patch.trapThreshold !== undefined &&
+    patch.blockThreshold !== undefined &&
+    patch.blockThreshold <= patch.trapThreshold
+  ) {
+    return { ok: false, error: 'Field "blockThreshold" must be greater than "trapThreshold".' };
+  }
+
+  if (body.allowedUpstreams !== undefined) {
+    if (!Array.isArray(body.allowedUpstreams) || body.allowedUpstreams.length > 30) {
+      return { ok: false, error: 'Field "allowedUpstreams" must be an array of up to 30 hostnames.' };
+    }
+    const cleanHosts: string[] = [];
+    for (const h of body.allowedUpstreams) {
+      if (typeof h !== 'string' || !/^[a-zA-Z0-9.-]{3,128}$/.test(h.trim())) {
+        return { ok: false, error: 'Each entry in "allowedUpstreams" must be a valid hostname.' };
+      }
+      cleanHosts.push(h.trim().toLowerCase());
+    }
+    patch.allowedUpstreams = cleanHosts;
+  }
+
+  return { ok: true, data: patch };
+}
+

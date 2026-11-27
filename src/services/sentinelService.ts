@@ -3,7 +3,13 @@ import type {
   ActionGateEvaluation,
   ActionPhase,
   AgentBaseline,
+  ApplianceStatus,
   AttributionFinding,
+  CliScanReport,
+  EdgeInspectionRecord,
+  EndpointActivityEvent,
+  EndpointAgentRecord,
+  EndpointContainmentMode,
   HarnessScenario,
   HarnessTestResult,
   IngressProvenance,
@@ -25,6 +31,10 @@ export interface PlatformStatePayload {
   scenarios: HarnessScenario[];
   defaultPolicy: SandboxPolicy;
   runtimeConfig: PublicRuntimeConfig;
+  endpoints: EndpointAgentRecord[];
+  endpointEvents: EndpointActivityEvent[];
+  edgeLogs: EdgeInspectionRecord[];
+  applianceStatus: ApplianceStatus | null;
 }
 
 export interface EvaluateActionRequest {
@@ -227,7 +237,20 @@ function validatePlatformState(raw: unknown): PlatformStatePayload {
   ) {
     throw new Error('Security backend returned an incomplete state payload.');
   }
-  return raw as unknown as PlatformStatePayload;
+  return {
+    ...(raw as unknown as Omit<
+      PlatformStatePayload,
+      'endpoints' | 'endpointEvents' | 'edgeLogs' | 'applianceStatus'
+    >),
+    endpoints: Array.isArray(raw.endpoints) ? (raw.endpoints as EndpointAgentRecord[]) : [],
+    endpointEvents: Array.isArray(raw.endpointEvents)
+      ? (raw.endpointEvents as EndpointActivityEvent[])
+      : [],
+    edgeLogs: Array.isArray(raw.edgeLogs) ? (raw.edgeLogs as EdgeInspectionRecord[]) : [],
+    applianceStatus: isPlainObject(raw.applianceStatus)
+      ? (raw.applianceStatus as unknown as ApplianceStatus)
+      : null,
+  };
 }
 
 function validateSemanticAuditResponse(raw: unknown): { audit: SemanticAuditResult } {
@@ -359,5 +382,100 @@ export const sentinelService = {
       appConfig.endpoints.sessionAttribution(sessionId),
       `${sessionId}_attribution_report.json`,
     );
+  },
+
+  async updateEndpointPolicy(
+    endpointId: string,
+    mode: EndpointContainmentMode,
+  ): Promise<{ endpoint: EndpointAgentRecord }> {
+    const raw = await requestJson<unknown>(appConfig.endpoints.endpointPolicy(endpointId), {
+      method: 'POST',
+      body: JSON.stringify({ mode }),
+    });
+    if (!isPlainObject(raw) || !isPlainObject(raw.endpoint)) {
+      throw new Error('Endpoint policy update returned an unexpected response.');
+    }
+    return raw as { endpoint: EndpointAgentRecord };
+  },
+
+  async sendEndpointEvent(params: {
+    endpoint_id: string;
+    kind: EndpointActivityEvent['kind'];
+    subject: string;
+    detail: string;
+  }): Promise<{ event: EndpointActivityEvent; local_directive: string }> {
+    const raw = await requestJson<unknown>(appConfig.endpoints.endpointEvent, {
+      method: 'POST',
+      body: JSON.stringify(params),
+    });
+    if (!isPlainObject(raw) || !isPlainObject(raw.event)) {
+      throw new Error('Endpoint telemetry ingestion returned an unexpected response.');
+    }
+    return raw as { event: EndpointActivityEvent; local_directive: string };
+  },
+
+  async interceptEdgeTraffic(params: {
+    method: string;
+    path: string;
+    agent_id: string;
+    user_goal: string;
+    tool_name: string;
+    upstream_url: string;
+    raw_payload: string;
+    forward?: boolean;
+  }): Promise<{ record: EdgeInspectionRecord }> {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), appConfig.requestTimeoutMs);
+    try {
+      const res = await fetch(appConfig.endpoints.edgeIntercept, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(params),
+        signal: controller.signal,
+      });
+      const contentType = res.headers.get('content-type') ?? '';
+      if (!contentType.includes('application/json')) {
+        throw new Error('Received unexpected non-JSON response from edge proxy.');
+      }
+      const data = (await res.json()) as Record<string, unknown>;
+      // 200 (forward), 202 (trap), and 403 (blocked in transit) are valid edge outcomes containing { record }
+      if (isPlainObject(data) && isPlainObject(data.record)) {
+        return { record: data.record as unknown as EdgeInspectionRecord };
+      }
+      const msg =
+        typeof data.error === 'string'
+          ? data.error
+          : `Edge inspection failed (status ${res.status}).`;
+      throw new Error(msg);
+    } finally {
+      clearTimeout(timeout);
+    }
+  },
+
+  async updateRuntimePolicy(patch: {
+    trapThreshold?: number;
+    blockThreshold?: number;
+    classifierPatternWeight?: number;
+    allowedUpstreams?: string[];
+  }): Promise<{ runtimeConfig: PublicRuntimeConfig }> {
+    const raw = await requestJson<unknown>(appConfig.endpoints.policyUpdate, {
+      method: 'PATCH',
+      body: JSON.stringify(patch),
+    });
+    if (!isPlainObject(raw) || !isPlainObject(raw.runtimeConfig)) {
+      throw new Error('Runtime policy update returned an unexpected response.');
+    }
+    return raw as { runtimeConfig: PublicRuntimeConfig };
+  },
+
+  async runCliScan(): Promise<{ report: CliScanReport }> {
+    const raw = await requestJson<unknown>(appConfig.endpoints.cliScan, {
+      method: 'POST',
+      body: JSON.stringify({}),
+    });
+    if (!isPlainObject(raw) || !isPlainObject(raw.report)) {
+      throw new Error('Pre-deployment CLI scan returned an unexpected response.');
+    }
+    return raw as { report: CliScanReport };
   },
 };

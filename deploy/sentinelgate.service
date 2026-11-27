@@ -1,0 +1,24 @@
+[Unit]
+Description=SentinelGate Standalone AI Agent Containment Appliance
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=sentinelgate
+Group=sentinelgate
+WorkingDirectory=/opt/sentinelgate
+Environment=NODE_ENV=production
+Environment=PORT=3000
+EnvironmentFile=-/etc/sentinelgate/sentinelgate.env
+ExecStart=/usr/bin/npx tsx /opt/sentinelgate/server.ts
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadOnlyPaths=/opt/sentinelgate
+
+[Install]
+WantedBy=multi-user.target

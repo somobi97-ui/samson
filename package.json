@@ -3,6 +3,9 @@
   "private": true,
   "version": "0.0.0",
   "type": "module",
+  "bin": {
+    "sentinelgate": "./cli/sentinel-cli.ts"
+  },
   "scripts": {
     "dev": "tsx server.ts",
     "start": "node server.ts",
@@ -10,7 +13,9 @@
     "preview": "vite preview",
     "clean": "rm -rf dist server.js",
     "lint": "tsc --noEmit",
-    "test": "tsx --test tests/**/*.test.ts"
+    "test": "tsx --test tests/**/*.test.ts",
+    "cli": "tsx cli/sentinel-cli.ts",
+    "agent": "tsx agent/sentinel-agent.ts"
   },
   "dependencies": {
     "@google/genai": "^2.4.0",

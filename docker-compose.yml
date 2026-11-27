@@ -1,0 +1,27 @@
+services:
+  sentinelgate-appliance:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: sentinelgate-appliance
+    ports:
+      - "3000:3000"
+    environment:
+      NODE_ENV: production
+      PORT: "3000"
+      GEMINI_INTENT_MODEL: "gemini-4-hydrogen"
+      GEMINI_THINKING_LEVEL: "LOW"
+      SANDBOX_EXECUTION_MODE: "deterministic"
+      SANDBOX_RUNTIME: "gvisor-runsc"
+      EDGE_ALLOWED_UPSTREAMS: "api.openai.com,generativelanguage.googleapis.com,mcp-tools.example.com"
+    env_file:
+      - path: .env
+        required: false
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=64m
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    restart: unless-stopped
